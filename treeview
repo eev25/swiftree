@@ -1,0 +1,174 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "plotly",
+# ]
+# ///
+
+"""
+treeview - Visualize Swift vs Objective-C distribution in a hybrid iOS codebase.
+
+Generates a Plotly Treemap saved to migration_progress.html showing the ratio
+of Swift to Objective-C files per directory. Red = ObjC-heavy, Blue = Swift-heavy.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import plotly.graph_objects as go
+
+
+def walk_tree(root: Path) -> tuple[dict, dict, dict]:
+    """Walk directory tree and collect direct file counts and ObjC filenames."""
+    direct_swift: dict[Path, int] = {}
+    direct_objc: dict[Path, int] = {}
+    direct_objc_files: dict[Path, list[str]] = {}
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        p = Path(dirpath)
+        # Skip hidden directories in-place
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+
+        swift_count = sum(1 for f in filenames if f.endswith(".swift"))
+        objc_files = [f for f in filenames if f.endswith((".h", ".m"))]
+
+        direct_swift[p] = swift_count
+        direct_objc[p] = len(objc_files)
+        direct_objc_files[p] = sorted(objc_files)
+
+    return direct_swift, direct_objc, direct_objc_files
+
+
+def compute_cumulative(
+    direct_swift: dict[Path, int],
+    direct_objc: dict[Path, int],
+) -> tuple[dict[Path, int], dict[Path, int]]:
+    """Bottom-up pass to accumulate counts from children to parents."""
+    cum_swift = dict(direct_swift)
+    cum_objc = dict(direct_objc)
+
+    # Sort deepest paths first so children are processed before parents
+    for p in sorted(cum_swift.keys(), key=lambda x: len(x.parts), reverse=True):
+        parent = p.parent
+        if parent in cum_swift and parent != p:
+            cum_swift[parent] += cum_swift[p]
+            cum_objc[parent] += cum_objc[p]
+
+    return cum_swift, cum_objc
+
+
+def build_treemap(root: Path) -> go.Figure:
+    direct_swift, direct_objc, direct_objc_files = walk_tree(root)
+    cum_swift, cum_objc = compute_cumulative(direct_swift, direct_objc)
+
+    # Keep only directories with at least one Swift or ObjC file in their subtree
+    relevant = {p for p in cum_swift if cum_swift[p] + cum_objc[p] > 0}
+
+    ids: list[str] = []
+    labels: list[str] = []
+    parents: list[str] = []
+    values: list[int] = []
+    colors: list[float] = []
+    customdata: list[str] = []
+
+    for p in sorted(relevant, key=lambda x: len(x.parts)):
+        node_id = str(p)
+        label = p.name if p != root else root.name
+
+        # Find nearest relevant ancestor as parent
+        if p == root:
+            parent_id = ""
+        else:
+            ancestor = p.parent
+            while ancestor not in relevant and ancestor != root.parent:
+                ancestor = ancestor.parent
+            parent_id = str(ancestor) if ancestor in relevant else ""
+
+        ds = direct_swift.get(p, 0)
+        do = direct_objc.get(p, 0)
+        direct_total = ds + do
+
+        cs = cum_swift[p]
+        co = cum_objc[p]
+        cum_total = cs + co
+        swift_ratio = cs / cum_total if cum_total > 0 else 0.5
+
+        objc_file_list = direct_objc_files.get(p, [])
+        hover_files = "<br>".join(objc_file_list) if objc_file_list else "(none)"
+
+        ids.append(node_id)
+        labels.append(label)
+        parents.append(parent_id)
+        values.append(max(direct_total, 1))
+        colors.append(swift_ratio)
+        customdata.append(
+            f"Swift (total): {cs}<br>"
+            f"ObjC (total): {co}<br>"
+            f"Swift %: {swift_ratio * 100:.1f}%<br>"
+            f"ObjC files here:<br>{hover_files}"
+        )
+
+    fig = go.Figure(
+        go.Treemap(
+            ids=ids,
+            labels=labels,
+            parents=parents,
+            values=values,
+            branchvalues="remainder",
+            customdata=customdata,
+            hovertemplate="<b>%{label}</b><br>%{customdata}<extra></extra>",
+            marker=dict(
+                colors=colors,
+                colorscale="RdBu",
+                cmid=0.5,
+                cmin=0.0,
+                cmax=1.0,
+                colorbar=dict(title="Swift ratio"),
+            ),
+            texttemplate="<b>%{label}</b>",
+        )
+    )
+
+    fig.update_layout(
+        title=f"Swift vs Objective-C: {root}",
+        margin=dict(t=50, l=25, r=25, b=25),
+    )
+
+    return fig
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="treeview",
+        description=(
+            "Visualize the Swift vs Objective-C file distribution in a hybrid iOS "
+            "codebase as an interactive Treemap. "
+            "Red nodes are Objective-C heavy; blue nodes are Swift heavy."
+        ),
+    )
+    parser.add_argument(
+        "directory",
+        help="Root directory to analyse (e.g. /path/to/wikipedia-ios)",
+    )
+    args = parser.parse_args()
+
+    root = Path(args.directory).resolve()
+    if not root.is_dir():
+        print(f"error: '{root}' is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scanning {root} …")
+    fig = build_treemap(root)
+
+    output = "migration_progress.html"
+    fig.write_html(output)
+    print(f"Saved → {output}")
+    subprocess.run(["open", output])
+
+
+if __name__ == "__main__":
+    main()
