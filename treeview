@@ -127,14 +127,23 @@ def build_treemap(root: Path) -> go.Figure:
                 cmid=0.5,
                 cmin=0.0,
                 cmax=1.0,
-                colorbar=dict(title="Swift ratio"),
+                colorbar=dict(title="Swift"),
             ),
             texttemplate="<b>%{label}</b>",
         )
     )
 
+    total_swift = cum_swift.get(root, 0)
+    total_objc = cum_objc.get(root, 0)
+    total = total_swift + total_objc
+    swift_pct = total_swift / total * 100 if total > 0 else 0
+    objc_pct = total_objc / total * 100 if total > 0 else 0
+    title = (
+        f"{root.name} — Swift: {swift_pct:.0f}%, Objective-C: {objc_pct:.0f}%"
+    )
+
     fig.update_layout(
-        title=f"Swift vs Objective-C: {root}",
+        title=title,
         margin=dict(t=50, l=25, r=25, b=25),
     )
 
